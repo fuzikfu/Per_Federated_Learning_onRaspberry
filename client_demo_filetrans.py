@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import importlib
 import torch
-import pickle #for pkl file reading
+import pickle  # for pkl file reading
 import os
 import sys
 import numpy as np
@@ -13,14 +13,70 @@ from PIL import Image
 import time
 import scipy.io
 import torchvision.transforms as transforms
+from torchvision.models import resnet18
 from config import SERVER_ADDR, SERVER_PORT
 from utils import recv_msg, send_msg, file_send
 import socket
 import struct
 from torchvision import transforms
+from torch.optim import Optimizer
 import math
+import copy
 
-#read data set from pkl files
+class FedAvgCNN1(nn.Module):
+    def __init__(self, in_features=1, num_classes=10, dim=1024):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_features,
+                        64,  # Increased number of filters
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64,  # Increased input filters
+                        128,  # Increased number of filters
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv3 = nn.Sequential(  # New convolutional layer
+            nn.Conv2d(128,  # Increased input filters
+                        256,  # Increased number of filters
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.fc1 = nn.Sequential(
+            nn.Linear(dim, 1024),  # Increased dimensions
+            nn.ReLU(inplace=True)
+        )
+        self.fc2 = nn.Sequential(  # New fully connected layer
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True)
+        )
+        self.fc = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = self.conv3(out)  # Forward through new conv layer
+        out = torch.flatten(out, 1)
+        out = self.fc1(out)
+        out = self.fc2(out)  # Forward through new fc layer
+        out = self.fc(out)
+        return out
+
+# read data set from pkl files
 class TwoConvOneFc(nn.Module):
     def __init__(self, input_shape, out_dim):
         super(TwoConvOneFc, self).__init__()
@@ -39,13 +95,49 @@ class TwoConvOneFc(nn.Module):
         out = self.fc2(out)
         return out
 
+class FedAvgCNN(nn.Module):
+    def __init__(self, in_features=1, num_classes=10, dim=1024):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_features,
+                        32,
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32,
+                        64,
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.fc1 = nn.Sequential(
+            nn.Linear(dim, 512),
+            nn.ReLU(inplace=True)
+        )
+        self.fc = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = torch.flatten(out, 1)
+        out = self.fc1(out)
+        out = self.fc(out)
+        return out
 
 class CifarCnn(nn.Module):
     def __init__(self, input_shape, out_dim):
         super(CifarCnn, self).__init__()
         self.conv1 = nn.Conv2d(input_shape[0], 32, 5)
         self.conv2 = nn.Conv2d(32, 64, 5)
-        self.fc1 = nn.Linear(64*5*5, 512)
+        self.fc1 = nn.Linear(64 * 5 * 5, 512)
         self.fc2 = nn.Linear(512, 128)
         self.fc3 = nn.Linear(128, out_dim)
 
@@ -71,35 +163,76 @@ class CifarCnn(nn.Module):
         out = self.fc3(out)
         return out
 
+#
+# def read_data(data_dir):
+#     """Parses data in given train and test data directories
+#
+#     Assumes:
+#         1. the data in the input directories are .json files with keys 'users' and 'user_data'
+#         2. the set of train set users is the same as the set of test set users
+#
+#     Return:
+#         clients: list of client ids
+#         groups: list of group ids; empty list if none found
+#         train_data: dictionary of train data (ndarray)
+#         test_data: dictionary of test data (ndarray)
+#     """
+#
+#     # clients = []
+#     # groups = []
+#     data = {}
+#     print('>>> Read data from:', data_dir)
+#
+#     # open training dataset pkl files
+#     with open(data_dir, 'rb') as inf:
+#         cdata = pickle.load(inf)
+#
+#     data.update(cdata)
+#
+#     data = MiniDataset(data['x'], data['y'])
+#
+#     return data
 
-def read_data(data_dir):
-    """Parses data in given train and test data directories
 
-    Assumes:
-        1. the data in the input directories are .json files with keys 'users' and 'user_data'
-        2. the set of train set users is the same as the set of test set users
+def read_data(dataset, idx, is_train=True):
+    if is_train:
+        train_data_dir = os.path.join('./dataset', dataset, 'train/')
 
-    Return:
-        clients: list of client ids
-        groups: list of group ids; empty list if none found
-        train_data: dictionary of train data (ndarray)
-        test_data: dictionary of test data (ndarray)
-    """
+        train_file = train_data_dir + str(idx) + '.npz'
+        with open(train_file, 'rb') as f:
+            train_data = np.load(f, allow_pickle=True)['data'].tolist()
 
-    #clients = []
-    #groups = []
-    data = {}
-    print('>>> Read data from:',data_dir)
+        return train_data
 
-    #open training dataset pkl files
-    with open(data_dir, 'rb') as inf:
-        cdata = pickle.load(inf)
-        
-    data.update(cdata)
+    else:
+        test_data_dir = os.path.join('./dataset', dataset, 'test/')
 
-    data= MiniDataset(data['x'], data['y'])
+        test_file = test_data_dir + str(idx) + '.npz'
+        with open(test_file, 'rb') as f:
+            test_data = np.load(f, allow_pickle=True)['data'].tolist()
 
-    return data
+        return test_data
+
+
+def read_client_data(dataset, idx, is_train=True):
+    if is_train:
+        train_data = read_data(dataset, idx, is_train)
+        X_train = torch.Tensor(train_data['x']).type(torch.float32)
+        y_train = torch.Tensor(train_data['y']).type(torch.int64)
+
+        train_data = [(x, y) for x, y in zip(X_train, y_train)]
+        return train_data
+    else:
+        test_data = read_data(dataset, idx, is_train)
+        X_test = torch.Tensor(test_data['x']).type(torch.float32)
+        y_test = torch.Tensor(test_data['y']).type(torch.int64)
+        test_data = [(x, y) for x, y in zip(X_test, y_test)]
+        return test_data
+
+
+def load_train_data(dataset, id, batch_size=None):
+    train_data = read_client_data(dataset, id, is_train=True)
+    return DataLoader(train_data, batch_size, drop_last=True, shuffle=True)
 
 class MiniDataset(Dataset):
     def __init__(self, data, labels):
@@ -108,7 +241,7 @@ class MiniDataset(Dataset):
         self.labels = np.array(labels).astype("int64")
 
         if self.data.ndim == 4 and self.data.shape[3] == 3:
-            self.data = self.data.reshape(-1,16,16,3).astype("uint8")
+            self.data = self.data.reshape(-1, 16, 16, 3).astype("uint8")
             self.transform = transforms.Compose(
                 [transforms.RandomHorizontalFlip(),
                  transforms.RandomCrop(32, 4),
@@ -132,7 +265,7 @@ class MiniDataset(Dataset):
         else:
             self.data = self.data.astype("float32")
             self.transform = None
-            
+
     def __len__(self):
         return len(self.labels)
 
@@ -153,15 +286,16 @@ class Logistic(nn.Module):
     def __init__(self):
         super(Logistic, self).__init__()
         self.relu = nn.ReLU()
-        self.hidden_layer1 = nn.Linear(784,200)
-        self.hidden_layer2 = nn.Linear(200,10)
+        self.hidden_layer1 = nn.Linear(784, 200)
+        self.hidden_layer2 = nn.Linear(200, 10)
         self.softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         x = self.hidden_layer1(x)
-        x =self.relu(x)
+        x = self.relu(x)
         x = self.hidden_layer2(x)
         return self.softmax(x)
+
 
 class MNIST_CNN(nn.Module):
     def __init__(self):
@@ -179,18 +313,33 @@ class MNIST_CNN(nn.Module):
         x = self.max_pool1(x)
         x = F.relu(self.conv2(x))
         x = self.max_pool2(x)
-        x = x.view(-1, 4*4*64)
+        x = x.view(-1, 4 * 4 * 64)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
 
+class PerAvgOptimizer(Optimizer):
+    def __init__(self, params, lr):
+        defaults = dict(lr=lr)
+        super(PerAvgOptimizer, self).__init__(params, defaults)
 
-def local_test(model,test_dataloader):
+    def step(self, beta=0):
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                d_p = p.grad.data
+                if(beta != 0):
+                    p.data.add_(other=d_p, alpha=-beta)
+                else:
+                    p.data.add_(other=d_p, alpha=-group['lr'])
+
+def local_test(model, test_dataloader):
     model.eval()
     print("test")
     test_loss = test_acc = test_total = 0.
     with torch.no_grad():
-        for x,y in test_dataloader:
+        for x, y in test_dataloader:
             pred = model(x)
             loss = criterion(pred, y)
             _, predicted = torch.max(pred, 1)
@@ -198,7 +347,7 @@ def local_test(model,test_dataloader):
             test_acc += correct.item()
             test_loss += loss.item() * y.size(0)
             test_total += y.size(0)
-    return test_acc/test_total, test_loss/test_total
+    return test_acc / test_total, test_loss / test_total
 
 
 sock = socket.socket()
@@ -211,7 +360,6 @@ try:
         cid = msg[2]
         print("cid:", cid)
 
-        
         # Training parameters
         lr_rate = options['lr']  # Initial learning rate
         weight_decay = 0.99  # Learning rate decay
@@ -219,30 +367,39 @@ try:
         batch_size = options['batch_size']  # Data sample for training per comm. round
         model = options['model']
         num_round = options['num_round']
-
-        #model = Logistic(784, 10)
+        beta = options['beta']
+        num_classes = options['num_classes']
+        # model = Logistic(784, 10)
         if model == 'cnn':
-            model = MNIST_CNN()
+            model = FedAvgCNN(in_features=3, num_classes=num_classes, dim=1600)
+        elif model == 'cnn1':
+            model = FedAvgCNN1(in_features=3, num_classes=num_classes, dim=1600)
+        elif model == 'resnet':
+            model = resnet18(pretrained=False, num_classes=options['num_classes'])
         else:
             model = Logistic()
-        #model = Logistic(2500, 6)
+        # model = Logistic(2500, 6)
         # model = Logistic(1024, 10)
         # model = TwoConvOneFc((3,16,16), 10)
-        optimizer = torch.optim.SGD(model.parameters(), lr=lr_rate,momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer,weight_decay,last_epoch=-1)
+        # optimizer = torch.optim.SGD(model.parameters(), lr=lr_rate, momentum=0.9)
+        optimizer = PerAvgOptimizer(model.parameters(), lr=lr_rate)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, weight_decay)
         criterion = torch.nn.CrossEntropyLoss()
 
         # Import the data set
-        file_name = 'iid/MNIST_iid' + str(cid) + '.pkl'
-        train_data = read_data(file_name)
+        # dataset = 'iid/MNIST_iid' + str(cid) + '.pkl'
+        dataset = 'Cifar100'
+        # train_data = read_data(file_name)
 
         print('data read successfully')
 
         # make the data loader
-        
-        train_loader = torch.utils.data.DataLoader(dataset=train_data,
-                                                   batch_size=batch_size,
-                                                   shuffle=True)
+
+        # train_loader = torch.utils.data.DataLoader(dataset=train_data,
+        #                                            batch_size=2*batch_size,
+        #                                            drop_last=True,
+        #                                            shuffle=True)
+        train_loader = load_train_data(dataset, cid, batch_size=2*batch_size)
 
         print('Make dataloader successfully')
 
@@ -335,18 +492,63 @@ try:
             #     break
 
             model.train()
+            sample_num = 0
+            sample_loss = 0
+            for i in range(2):
+                for iteration in range(num_epoch):
+                    # for batch_idx, (x,y) in enumerate(train_loader):
+                    # x, y = next(iter(train_loader))
+                    # if options['model'] == 'logistic':
+                    #     x = torch.reshape(x, (x.shape[0], 784))
+                    #
+                    # optimizer.zero_grad()
+                    # pred = model(x)
+                    # loss = criterion(pred, y)
+                    # loss.backward()
+                    # optimizer.step()
+                    for X, Y in train_loader:
+                        temp_model = copy.deepcopy(list(model.parameters()))
 
-            for iteration in range(num_epoch):
-                #for batch_idx, (x,y) in enumerate(train_loader):
-                x, y = next(iter(train_loader))
-                if options['model'] == 'logistic':
-                    x = torch.reshape(x, (x.shape[0], 784))
+                        # step 1
+                        if type(X) == type([]):
+                            x = [None, None]
+                            x[0] = X[0][:batch_size]
+                            x[1] = X[1][:batch_size]
+                        else:
+                            x = X[:batch_size]
+                        y = Y[:batch_size]
 
-                optimizer.zero_grad()
-                pred = model(x)
-                loss = criterion(pred,y)
-                loss.backward()
-                optimizer.step()
+                        output = model(x)
+                        loss = criterion(output, y)
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+
+                        # step 2
+                        if type(X) == type([]):
+                            x = [None, None]
+                            x[0] = X[0][batch_size:]
+                            x[1] = X[1][batch_size:]
+                        else:
+                            x = X[batch_size:]
+                        y = Y[batch_size:]
+
+                        optimizer.zero_grad()
+                        output = model(x)
+                        loss = criterion(output, y)
+                        loss.backward()
+
+                        loss = loss.item()
+                        # 【ADD: 在这保存train loss】
+                        sample_num += y.shape[0]
+                        sample_loss += loss * y.shape[0]
+
+                        # restore the model parameters to the one before first update
+                        # 回滚参数更新
+                        for old_param, new_param in zip(model.parameters(), temp_model):
+                            old_param.data = new_param.data.clone()
+
+                        optimizer.step(beta=beta)
             #     print('Global Round:'+ round_i+'\t'+'Local Epoch:')
 
             end = time.time()
@@ -373,4 +575,3 @@ try:
 except (struct.error, socket.error):
     print('Server has stopped')
     pass
-

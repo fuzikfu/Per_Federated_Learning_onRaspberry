@@ -9,6 +9,7 @@ from torch import nn
 import torch.nn.functional as F
 import importlib
 from torch.utils.data import DataLoader, Dataset
+from torchvision.models import resnet18
 import scipy.io
 # from config import OPTIMIZERS, DATASETS, MODEL_PARAMS, TRAINERS, BATCH_LIST, SERVER_ADDR,SERVER_PORT
 from config import SERVER_ADDR, SERVER_PORT
@@ -18,6 +19,62 @@ from utils import recv_msg, send_msg, file_recv
 from torchvision import transforms
 import math
 from PIL import Image
+
+class FedAvgCNN1(nn.Module):
+    def __init__(self, in_features=1, num_classes=10, dim=1024):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_features,
+                        64,  # Increased number of filters
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64,  # Increased input filters
+                        128,  # Increased number of filters
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv3 = nn.Sequential(  # New convolutional layer
+            nn.Conv2d(128,  # Increased input filters
+                        256,  # Increased number of filters
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.fc1 = nn.Sequential(
+            nn.Linear(dim, 1024),  # Increased dimensions
+            nn.ReLU(inplace=True)
+        )
+        self.fc2 = nn.Sequential(  # New fully connected layer
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True)
+        )
+        self.fc = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = self.conv3(out)  # Forward through new conv layer
+        out = torch.flatten(out, 1)
+        out = self.fc1(out)
+        out = self.fc2(out)  # Forward through new fc layer
+        out = self.fc(out)
+        return out
+
+
+
 
 class TwoConvOneFc(nn.Module):
     def __init__(self, input_shape, out_dim):
@@ -37,13 +94,49 @@ class TwoConvOneFc(nn.Module):
         out = self.fc2(out)
         return out
 
+class FedAvgCNN(nn.Module):
+    def __init__(self, in_features=1, num_classes=10, dim=1024):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_features,
+                        32,
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32,
+                        64,
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.fc1 = nn.Sequential(
+            nn.Linear(dim, 512),
+            nn.ReLU(inplace=True)
+        )
+        self.fc = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = torch.flatten(out, 1)
+        out = self.fc1(out)
+        out = self.fc(out)
+        return out
 
 class CifarCnn(nn.Module):
     def __init__(self, input_shape, out_dim):
         super(CifarCnn, self).__init__()
         self.conv1 = nn.Conv2d(input_shape[0], 32, 5)
         self.conv2 = nn.Conv2d(32, 64, 5)
-        self.fc1 = nn.Linear(64*5*5, 512)
+        self.fc1 = nn.Linear(64 * 5 * 5, 512)
         self.fc2 = nn.Linear(512, 128)
         self.fc3 = nn.Linear(128, out_dim)
 
@@ -77,7 +170,7 @@ class MiniDataset(Dataset):
         self.labels = np.array(labels).astype("int64")
 
         if self.data.ndim == 4 and self.data.shape[3] == 3:
-            self.data = self.data.reshape(-1,16,16,3).astype("uint8")
+            self.data = self.data.reshape(-1, 16, 16, 3).astype("uint8")
             self.transform = transforms.Compose(
                 [transforms.RandomHorizontalFlip(),
                  transforms.RandomCrop(32, 4),
@@ -101,7 +194,7 @@ class MiniDataset(Dataset):
         else:
             self.data = self.data.astype("float32")
             self.transform = None
-            
+
     def __len__(self):
         return len(self.labels)
 
@@ -116,34 +209,62 @@ class MiniDataset(Dataset):
 
         return data, target
 
-def read_data(data_dir):
-    """Parses data in given train and test data directories
 
-    Assumes:
-        1. the data in the input directories are .json files with keys 'users' and 'user_data'
-        2. the set of train set users is the same as the set of test set users
+# def read_data(data_dir):
+#
+#     data = {}
+#     print('>>> Read data from:', data_dir)
+#
+#     # open training dataset pkl files
+#     with open(data_dir, 'rb') as inf:
+#         cdata = pickle.load(inf)
+#
+#     data.update(cdata)
+#
+#     data = MiniDataset(data['x'], data['y'])
+#
+#     return data
 
-    Return:
-        clients: list of client ids
-        groups: list of group ids; empty list if none found
-        train_data: dictionary of train data (ndarray)
-        test_data: dictionary of test data (ndarray)
-    """
+def read_data(dataset, idx, is_train=True):
+    if is_train:
+        train_data_dir = os.path.join('../dataset', dataset, 'train/')
 
-    #clients = []
-    #groups = []
-    data = {}
-    print('>>> Read data from:',data_dir)
+        train_file = train_data_dir + str(idx) + '.npz'
+        with open(train_file, 'rb') as f:
+            train_data = np.load(f, allow_pickle=True)['data'].tolist()
 
-    #open training dataset pkl files
-    with open(data_dir, 'rb') as inf:
-        cdata = pickle.load(inf)
-        
-    data.update(cdata)
+        return train_data
 
-    data= MiniDataset(data['x'], data['y'])
+    else:
+        test_data_dir = os.path.join('../dataset', dataset, 'test/')
 
-    return data
+        test_file = test_data_dir + str(idx) + '.npz'
+        with open(test_file, 'rb') as f:
+            test_data = np.load(f, allow_pickle=True)['data'].tolist()
+
+        return test_data
+
+
+def read_client_data(dataset, idx, is_train=True):
+    if is_train:
+        train_data = read_data(dataset, idx, is_train)
+        X_train = torch.Tensor(train_data['x']).type(torch.float32)
+        y_train = torch.Tensor(train_data['y']).type(torch.int64)
+
+        train_data = [(x, y) for x, y in zip(X_train, y_train)]
+        return train_data
+    else:
+        test_data = read_data(dataset, idx, is_train)
+        X_test = torch.Tensor(test_data['x']).type(torch.float32)
+        y_test = torch.Tensor(test_data['y']).type(torch.int64)
+        test_data = [(x, y) for x, y in zip(X_test, y_test)]
+        return test_data
+
+
+def load_test_data(dataset, id, batch_size=None):
+    test_data = read_client_data(dataset, id, is_train=False)
+    return DataLoader(test_data, batch_size, drop_last=False, shuffle=True)
+
 
 def exp_details(options):
     print('\nExperimental details:')
@@ -161,6 +282,7 @@ def exp_details(options):
     print(f'    Local Batch size   : {options.local_bs}')
     print(f'    Local Epochs       : {options.local_ep}\n')
     return
+
 
 def test_inference(args, model, testloader):
     """ Returns the test accuracy and loss.
@@ -191,9 +313,10 @@ def test_inference(args, model, testloader):
         correct += torch.sum(torch.eq(pred_labels, labels)).item()
         total += len(labels)
 
-    accuracy = correct/total
-    loss = loss/total
+    accuracy = correct / total
+    loss = loss / total
     return accuracy, loss
+
 
 def average_weights(w):
     """
@@ -206,20 +329,22 @@ def average_weights(w):
         w_avg[key] = torch.div(w_avg[key], len(w))
     return w_avg
 
+
 # Model for MQTT_IOT_IDS dataset
 class Logistic(nn.Module):
     def __init__(self):
         super(Logistic, self).__init__()
         self.relu = nn.ReLU()
-        self.hidden_layer1 = nn.Linear(784,200)
-        self.hidden_layer2 = nn.Linear(200,10)
+        self.hidden_layer1 = nn.Linear(784, 200)
+        self.hidden_layer2 = nn.Linear(200, 10)
         self.softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         x = self.hidden_layer1(x)
-        x =self.relu(x)
+        x = self.relu(x)
         x = self.hidden_layer2(x)
         return self.softmax(x)
+
 
 class MNIST_CNN(nn.Module):
     def __init__(self):
@@ -237,7 +362,7 @@ class MNIST_CNN(nn.Module):
         x = self.max_pool1(x)
         x = F.relu(self.conv2(x))
         x = self.max_pool2(x)
-        x = x.view(-1, 4*4*64)
+        x = x.view(-1, 4 * 4 * 64)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
@@ -258,7 +383,7 @@ def read_options():
     parser.add_argument('--model',
                         help='name of model;',
                         type=str,
-                        default='cnn')
+                        default='cnn1')
     parser.add_argument('--wd',
                         help='weight decay parameter;',
                         type=float,
@@ -290,7 +415,7 @@ def read_options():
     parser.add_argument('--clients_per_round',
                         help='number of clients trained per round;',
                         type=int,
-                        default=1)
+                        default=4)
     parser.add_argument('--batch_size',
                         help='batch size when clients train on data;',
                         type=int,
@@ -311,31 +436,37 @@ def read_options():
                         help='add more information;',
                         type=str,
                         default='')
+    parser.add_argument('--beta',
+                        help='for peravg',
+                        type=float,
+                        default=0.0)
+    parser.add_argument('--num_classes',
+                        help='classified to n classes',
+                        type=int,
+                        default=100)
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
 
-
     return options
+
 
 def select_clients():
     num_clients = min(options['clients_per_round'], n_nodes)
-    #np.random.seed(seed)
-    return np.random.choice(range(0,len(client_sock_all)), num_clients, replace=False).tolist()
+    # np.random.seed(seed)
+    return np.random.choice(range(0, len(client_sock_all)), num_clients, replace=False).tolist()
 
 
-if __name__== '__main__':
-    
+if __name__ == '__main__':
+
     listening_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listening_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listening_sock.bind((SERVER_ADDR, SERVER_PORT))
     client_sock_all = []
 
-   
     options = read_options()
 
-    
-    n_nodes = 2
+    n_nodes = 1
     aggregation_count = 0
     # Establish connections to each client, up to n_nodes clients, setup for clients
     while len(client_sock_all) < n_nodes:
@@ -353,53 +484,52 @@ if __name__== '__main__':
 
     print('All clients connected')
 
-   
     # exp_details(options)
     if options['gpu']:
         torch.cuda.set_device(options['gpu'])
     device = 'cuda' if options['gpu'] else 'cpu'
 
-   
     # test_dataset = []
     # train_data, test_data = read_data('./cifar/cifar0.pkl', './cifar/cifar_test.pkl')
     # train_data, test_data = read_data('./fmnist/fmnist0.pkl', './fmnist/FMNIST_test.pkl')
-    #train_data, test_data = read_data('./mnist/iid/mnist0.pkl', './mnist/MNIST_test.pkl')
-    test_data = read_data('MNIST_test2.pkl')
-    #test_data = read_data('./pcap/traffic_test.pkl')
+    # train_data, test_data = read_data('./mnist/iid/mnist0.pkl', './mnist/MNIST_test.pkl')
+    # test_data = read_data('MNIST_test2.pkl')
+    # test_data = read_data('./pcap/traffic_test.pkl')
     # train_data, test_data = read_data('./usps/usps0.pkl', './usps/usps_test.pkl')
 
-    test_loader = DataLoader(dataset=test_data,
-                             batch_size=64,
-                             shuffle=True)
+    # test_loader = DataLoader(dataset=test_data,
+    #                          batch_size=64,
+    #                          shuffle=True)
 
     if options['model'] == 'cnn':
-        global_model = MNIST_CNN()
+        global_model = FedAvgCNN(in_features=3, num_classes=options['num_classes'], dim=1600)
+    elif options['model'] == 'resnet':
+        global_model = resnet18(pretrained=False, num_classes=options['num_classes']).to(device)
+    elif options['model'] == 'cnn1':
+        global_model = FedAvgCNN1(in_features=3, num_classes=options['num_classes'], dim=1600)
     else:
         global_model = Logistic()
 
-    
     global_model.to(device)
     global_model.train()
 
     global_weights = global_model.state_dict()
 
-    
     train_accuracy, train_loss = [], []
     cv_loss, cv_acc = [], []
     print_every = 2
 
     global_train_time = []
-    start1 =time.time()
-    for i in range(options['num_round'] + 1 ):
+    start1 = time.time()
+    for i in range(options['num_round'] + 1):
+        time.sleep(1)
         local_weights, local_losses = [], []
-        print(f'\n | Global Training Round : {i+1} |\n')
+        print(f'\n | Global Training Round : {i + 1} |\n')
 
         global_weights = global_model.state_dict()
 
-        
         selected_clients = select_clients()
 
-        
         is_last_round = False
         print('---------------------------------------------------------------------------')
         aggregation_count += 1
@@ -408,10 +538,10 @@ if __name__== '__main__':
             for n in range(n_nodes):
                 msg = ['MSG_WEIGHT_TAU_SERVER_TO_CLIENT', is_last_round, global_weights, aggregation_count]
                 send_msg(client_sock_all[n][2], msg)
-            for n in range(n_nodes):
-                for i in range(9):
-                    file_recv(client_sock_all[n][2])
-            break
+            # for n in range(n_nodes):
+            #     for i in range(9):
+            #         file_recv(client_sock_all[n][2])
+            # break
 
         start = time.time()
         for n in selected_clients:
@@ -422,41 +552,36 @@ if __name__== '__main__':
 
         for n in selected_clients:
             msg, temp = recv_msg(client_sock_all[n][2], 'MSG_WEIGHT_TIME_SIZE_CLIENT_TO_SERVER')
-            
+
             w = msg[1]
             local_weights.append(copy.deepcopy(w))
             # local_losses.append(copy.deepcopy(loss))
 
-
         global_weights = average_weights(local_weights)
 
-       
         global_model.load_state_dict(global_weights)
 
         # loss_avg = sum(local_losses) / len(local_losses)
         # train_loss.append(loss_avg)
 
         end = time.time()
-        test_acc, test_loss = test_inference(options, global_model, test_loader)
-        print(test_acc,test_loss)
-        cv_acc.append(test_acc)
-        cv_loss.append(test_loss)
-        global_train_time.append(end-start)
+        # test_acc, test_loss = test_inference(options, global_model, test_loader)
+        # print(test_acc, test_loss)
+        # cv_acc.append(test_acc)
+        # cv_loss.append(test_loss)
+        global_train_time.append(end - start)
         end1 = time.time()
-        #average_acc=sum(cv_acc)/len(cv_acc)
-        #print(average_acc)
+        # average_acc=sum(cv_acc)/len(cv_acc)
+        # print(average_acc)
         # if is_last_round == True:
 
+        # if test_acc >= 1.0:
+        #     print(end1 - start1)
+        #     break
 
-        if  test_acc>=1.0:
-            print(end1-start1)
-            break
-
-    saveTitle ='K' + str(options['clients_per_round']) +  'T' + str(options['num_round']) + 'E' + str(options['num_epoch']) + 'B' + str(options['batch_size'])
+    saveTitle = 'K' + str(options['clients_per_round']) + 'T' + str(options['num_round']) + 'E' + str(
+        options['num_epoch']) + 'B' + str(options['batch_size'])
     scipy.io.savemat(saveTitle + '_time' + '.mat', mdict={saveTitle + '_time': global_train_time})
-    scipy.io.savemat(saveTitle + '_acc' + '.mat', mdict={saveTitle + '_acc': cv_acc})
-    scipy.io.savemat(saveTitle + '_loss' + '.mat', mdict={saveTitle + '_loss': cv_loss})
+    # scipy.io.savemat(saveTitle + '_acc' + '.mat', mdict={saveTitle + '_acc': cv_acc})
+    # scipy.io.savemat(saveTitle + '_loss' + '.mat', mdict={saveTitle + '_loss': cv_loss})
     # Save tracked information
-
-
-
