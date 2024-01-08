@@ -9,6 +9,7 @@ from torch import nn
 import torch.nn.functional as F
 import importlib
 from torch.utils.data import DataLoader, Dataset
+from torchvision.models import resnet18
 import scipy.io
 # from config import OPTIMIZERS, DATASETS, MODEL_PARAMS, TRAINERS, BATCH_LIST, SERVER_ADDR,SERVER_PORT
 from config import SERVER_ADDR, SERVER_PORT
@@ -18,6 +19,96 @@ from utils import recv_msg, send_msg, file_recv
 from torchvision import transforms
 import math
 from PIL import Image
+
+class FedAvgCNN1(nn.Module):
+    def __init__(self, in_features=1, num_classes=10, dim=4096):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_features,
+                        64,  # Increased number of filters
+                        kernel_size=3,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64,  # Increased input filters
+                        128,  # Increased number of filters
+                        kernel_size=3,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv3 = nn.Sequential(  # New convolutional layer
+            nn.Conv2d(128,  # Increased input filters
+                        256,  # Increased number of filters
+                        kernel_size=3,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.fc1 = nn.Sequential(
+            nn.Linear(dim, 1024),  # Increased dimensions
+            nn.ReLU(inplace=True)
+        )
+        self.fc2 = nn.Sequential(  # New fully connected layer
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True)
+        )
+        self.fc = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = self.conv3(out)  # Forward through new conv layer
+        out = torch.flatten(out, 1)
+        out = self.fc1(out)
+        out = self.fc2(out)  # Forward through new fc layer
+        out = self.fc(out)
+        return out
+
+class FedAvgCNN(nn.Module):
+    def __init__(self, in_features=1, num_classes=10, dim=1024):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_features,
+                        32,
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32,
+                        64,
+                        kernel_size=5,
+                        padding=0,
+                        stride=1,
+                        bias=True),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
+        )
+        self.fc1 = nn.Sequential(
+            nn.Linear(dim, 512),
+            nn.ReLU(inplace=True)
+        )
+        self.fc = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = torch.flatten(out, 1)
+        out = self.fc1(out)
+        out = self.fc(out)
+        return out
 
 class TwoConvOneFc(nn.Module):
     def __init__(self, input_shape, out_dim):
@@ -70,80 +161,118 @@ class CifarCnn(nn.Module):
         return out
 
 
-class MiniDataset(Dataset):
-    def __init__(self, data, labels):
-        super(MiniDataset, self).__init__()
-        self.data = np.array(data)
-        self.labels = np.array(labels).astype("int64")
+# class MiniDataset(Dataset):
+#     def __init__(self, data, labels):
+#         super(MiniDataset, self).__init__()
+#         self.data = np.array(data)
+#         self.labels = np.array(labels).astype("int64")
 
-        if self.data.ndim == 4 and self.data.shape[3] == 3:
-            self.data = self.data.reshape(-1,16,16,3).astype("uint8")
-            self.transform = transforms.Compose(
-                [transforms.RandomHorizontalFlip(),
-                 transforms.RandomCrop(32, 4),
-                 transforms.ToTensor(),
-                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                 ]
-            )
-        elif self.data.ndim == 4 and self.data.shape[3] == 1:
-            self.transform = transforms.Compose(
-                [transforms.ToTensor(),
-                 transforms.Normalize((0.1307,), (0.3081,))
-                 ]
-            )
-        elif self.data.ndim == 3:
-            self.data = self.data.reshape(-1, 28, 28, 1).astype("uint8")
-            self.transform = transforms.Compose(
-                [transforms.ToTensor(),
-                 transforms.Normalize((0.1307,), (0.3081,))
-                 ]
-            )
-        else:
-            self.data = self.data.astype("float32")
-            self.transform = None
+#         if self.data.ndim == 4 and self.data.shape[3] == 3:
+#             self.data = self.data.reshape(-1,16,16,3).astype("uint8")
+#             self.transform = transforms.Compose(
+#                 [transforms.RandomHorizontalFlip(),
+#                  transforms.RandomCrop(32, 4),
+#                  transforms.ToTensor(),
+#                  transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+#                  ]
+#             )
+#         elif self.data.ndim == 4 and self.data.shape[3] == 1:
+#             self.transform = transforms.Compose(
+#                 [transforms.ToTensor(),
+#                  transforms.Normalize((0.1307,), (0.3081,))
+#                  ]
+#             )
+#         elif self.data.ndim == 3:
+#             self.data = self.data.reshape(-1, 28, 28, 1).astype("uint8")
+#             self.transform = transforms.Compose(
+#                 [transforms.ToTensor(),
+#                  transforms.Normalize((0.1307,), (0.3081,))
+#                  ]
+#             )
+#         else:
+#             self.data = self.data.astype("float32")
+#             self.transform = None
             
-    def __len__(self):
-        return len(self.labels)
+#     def __len__(self):
+#         return len(self.labels)
 
-    def __getitem__(self, index):
-        data, target = self.data[index], self.labels[index]
+#     def __getitem__(self, index):
+#         data, target = self.data[index], self.labels[index]
 
-        if self.data.ndim == 4 and self.data.shape[3] == 3:
-            data = Image.fromarray(data)
+#         if self.data.ndim == 4 and self.data.shape[3] == 3:
+#             data = Image.fromarray(data)
 
-        if self.transform is not None:
-            data = self.transform(data)
+#         if self.transform is not None:
+#             data = self.transform(data)
 
-        return data, target
+#         return data, target
 
-def read_data(data_dir):
-    """Parses data in given train and test data directories
+# def read_data(data_dir):
+#     """Parses data in given train and test data directories
 
-    Assumes:
-        1. the data in the input directories are .json files with keys 'users' and 'user_data'
-        2. the set of train set users is the same as the set of test set users
+#     Assumes:
+#         1. the data in the input directories are .json files with keys 'users' and 'user_data'
+#         2. the set of train set users is the same as the set of test set users
 
-    Return:
-        clients: list of client ids
-        groups: list of group ids; empty list if none found
-        train_data: dictionary of train data (ndarray)
-        test_data: dictionary of test data (ndarray)
-    """
+#     Return:
+#         clients: list of client ids
+#         groups: list of group ids; empty list if none found
+#         train_data: dictionary of train data (ndarray)
+#         test_data: dictionary of test data (ndarray)
+#     """
 
-    #clients = []
-    #groups = []
-    data = {}
-    print('>>> Read data from:',data_dir)
+#     #clients = []
+#     #groups = []
+#     data = {}
+#     print('>>> Read data from:',data_dir)
 
-    #open training dataset pkl files
-    with open(data_dir, 'rb') as inf:
-        cdata = pickle.load(inf)
+#     #open training dataset pkl files
+#     with open(data_dir, 'rb') as inf:
+#         cdata = pickle.load(inf)
         
-    data.update(cdata)
+#     data.update(cdata)
 
-    data= MiniDataset(data['x'], data['y'])
+#     data= MiniDataset(data['x'], data['y'])
 
-    return data
+#     return data
+
+def read_data(dataset, idx, is_train=True):
+    if is_train:
+        train_data_dir = os.path.join('../dataset', dataset, 'train/')
+
+        train_file = train_data_dir + str(idx) + '.npz'
+        with open(train_file, 'rb') as f:
+            train_data = np.load(f, allow_pickle=True)['data'].tolist()
+
+        return train_data
+
+    else:
+        test_data_dir = os.path.join('../dataset', dataset, 'test/')
+
+        test_file = test_data_dir + str(idx) + '.npz'
+        with open(test_file, 'rb') as f:
+            test_data = np.load(f, allow_pickle=True)['data'].tolist()
+
+        return test_data
+
+def read_client_data(dataset, idx, is_train=True):
+    if is_train:
+        train_data = read_data(dataset, idx, is_train)
+        X_train = torch.Tensor(train_data['x']).type(torch.float32)
+        y_train = torch.Tensor(train_data['y']).type(torch.int64)
+
+        train_data = [(x, y) for x, y in zip(X_train, y_train)]
+        return train_data
+    else:
+        test_data = read_data(dataset, idx, is_train)
+        X_test = torch.Tensor(test_data['x']).type(torch.float32)
+        y_test = torch.Tensor(test_data['y']).type(torch.int64)
+        test_data = [(x, y) for x, y in zip(X_test, y_test)]
+        return test_data
+
+def load_test_data(dataset, id, batch_size=None):
+    test_data = read_client_data(dataset, id, is_train=False)
+    return DataLoader(test_data, batch_size, drop_last=False, shuffle=True)
 
 def exp_details(options):
     print('\nExperimental details:')
@@ -258,7 +387,7 @@ def read_options():
     parser.add_argument('--model',
                         help='name of model;',
                         type=str,
-                        default='cnn')
+                        default='cnn1')
     parser.add_argument('--wd',
                         help='weight decay parameter;',
                         type=float,
@@ -311,6 +440,10 @@ def read_options():
                         help='add more information;',
                         type=str,
                         default='')
+    parser.add_argument('--num_classes',
+                        help='classified to n classes',
+                        type=int,
+                        default=100)
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
@@ -335,7 +468,7 @@ if __name__== '__main__':
     options = read_options()
 
     
-    n_nodes = 2
+    n_nodes = 1
     aggregation_count = 0
     # Establish connections to each client, up to n_nodes clients, setup for clients
     while len(client_sock_all) < n_nodes:
@@ -364,16 +497,20 @@ if __name__== '__main__':
     # train_data, test_data = read_data('./cifar/cifar0.pkl', './cifar/cifar_test.pkl')
     # train_data, test_data = read_data('./fmnist/fmnist0.pkl', './fmnist/FMNIST_test.pkl')
     #train_data, test_data = read_data('./mnist/iid/mnist0.pkl', './mnist/MNIST_test.pkl')
-    test_data = read_data('MNIST_test2.pkl')
+    # test_data = read_data('MNIST_test2.pkl')
     #test_data = read_data('./pcap/traffic_test.pkl')
     # train_data, test_data = read_data('./usps/usps0.pkl', './usps/usps_test.pkl')
 
-    test_loader = DataLoader(dataset=test_data,
-                             batch_size=64,
-                             shuffle=True)
+    # test_loader = DataLoader(dataset=test_data,
+    #                          batch_size=64,
+    #                          shuffle=True)
 
     if options['model'] == 'cnn':
-        global_model = MNIST_CNN()
+        global_model = FedAvgCNN(in_features=3, num_classes=options['num_classes'], dim=1600)
+    elif options['model'] == 'resnet':
+        global_model = resnet18(pretrained=False, num_classes=options['num_classes']).to(device)
+    elif options['model'] == 'cnn1':
+        global_model = FedAvgCNN1(in_features=1, num_classes=options['num_classes'], dim=256)
     else:
         global_model = Logistic()
 
@@ -408,10 +545,10 @@ if __name__== '__main__':
             for n in range(n_nodes):
                 msg = ['MSG_WEIGHT_TAU_SERVER_TO_CLIENT', is_last_round, global_weights, aggregation_count]
                 send_msg(client_sock_all[n][2], msg)
-            for n in range(n_nodes):
-                for i in range(9):
-                    file_recv(client_sock_all[n][2])
-            break
+            # for n in range(n_nodes):
+            #     for i in range(9):
+            #         # file_recv(client_sock_all[n][2])
+            #     break
 
         start = time.time()
         for n in selected_clients:
@@ -437,10 +574,11 @@ if __name__== '__main__':
         # train_loss.append(loss_avg)
 
         end = time.time()
-        test_acc, test_loss = test_inference(options, global_model, test_loader)
-        print(test_acc,test_loss)
-        cv_acc.append(test_acc)
-        cv_loss.append(test_loss)
+        # 不需要进行测试，注释掉了
+        # test_acc, test_loss = test_inference(options, global_model, test_loader)
+        # print(test_acc,test_loss)
+        # cv_acc.append(test_acc)
+        # cv_loss.append(test_loss)
         global_train_time.append(end-start)
         end1 = time.time()
         #average_acc=sum(cv_acc)/len(cv_acc)
@@ -448,15 +586,16 @@ if __name__== '__main__':
         # if is_last_round == True:
 
 
-        if  test_acc>=1.0:
-            print(end1-start1)
-            break
+        # if  test_acc>=1.0:
+        #     print(end1-start1)
+        #     break
 
-    saveTitle ='K' + str(options['clients_per_round']) +  'T' + str(options['num_round']) + 'E' + str(options['num_epoch']) + 'B' + str(options['batch_size'])
+    saveTitle ='K' + str(options['clients_per_round']) +  'T' + str(options['num_round']) + 'E' + str(
+        options['num_epoch']) + 'B' + str(options['batch_size'])
     scipy.io.savemat(saveTitle + '_time' + '.mat', mdict={saveTitle + '_time': global_train_time})
-    scipy.io.savemat(saveTitle + '_acc' + '.mat', mdict={saveTitle + '_acc': cv_acc})
-    scipy.io.savemat(saveTitle + '_loss' + '.mat', mdict={saveTitle + '_loss': cv_loss})
-    # Save tracked information
+    # scipy.io.savemat(saveTitle + '_acc' + '.mat', mdict={saveTitle + '_acc': cv_acc})
+    # scipy.io.savemat(saveTitle + '_loss' + '.mat', mdict={saveTitle + '_loss': cv_loss})
+    # # Save tracked information
 
 
 

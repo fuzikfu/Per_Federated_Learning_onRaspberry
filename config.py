@@ -8,7 +8,7 @@ TRAINERS = {'fedavg': 'FedAvgTrainer',
 OPTIMIZERS = TRAINERS.keys()
 BATCH_LIST = [32, 64, 128, 256, 32, 64, 128, 256,32, 64, 128, 256,32, 64, 128, 256,32, 64, 128, 256]
 # SERVER_ADDR= 'localhost'   # When running in a real distributed setting, change to the server's IP address
-SERVER_ADDR= '169.254.231.192'   # When running in a real distributed setting, change to the server's IP address
+SERVER_ADDR= '127.0.0.1'   # When running in a real distributed setting, change to the server's IP address
 SERVER_PORT = 51000
 
 

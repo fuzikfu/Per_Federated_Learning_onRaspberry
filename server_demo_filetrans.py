@@ -163,51 +163,51 @@ class CifarCnn(nn.Module):
         return out
 
 
-class MiniDataset(Dataset):
-    def __init__(self, data, labels):
-        super(MiniDataset, self).__init__()
-        self.data = np.array(data)
-        self.labels = np.array(labels).astype("int64")
+# class MiniDataset(Dataset):
+#     def __init__(self, data, labels):
+#         super(MiniDataset, self).__init__()
+#         self.data = np.array(data)
+#         self.labels = np.array(labels).astype("int64")
 
-        if self.data.ndim == 4 and self.data.shape[3] == 3:
-            self.data = self.data.reshape(-1, 16, 16, 3).astype("uint8")
-            self.transform = transforms.Compose(
-                [transforms.RandomHorizontalFlip(),
-                 transforms.RandomCrop(32, 4),
-                 transforms.ToTensor(),
-                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                 ]
-            )
-        elif self.data.ndim == 4 and self.data.shape[3] == 1:
-            self.transform = transforms.Compose(
-                [transforms.ToTensor(),
-                 transforms.Normalize((0.1307,), (0.3081,))
-                 ]
-            )
-        elif self.data.ndim == 3:
-            self.data = self.data.reshape(-1, 28, 28, 1).astype("uint8")
-            self.transform = transforms.Compose(
-                [transforms.ToTensor(),
-                 transforms.Normalize((0.1307,), (0.3081,))
-                 ]
-            )
-        else:
-            self.data = self.data.astype("float32")
-            self.transform = None
+#         if self.data.ndim == 4 and self.data.shape[3] == 3:
+#             self.data = self.data.reshape(-1, 16, 16, 3).astype("uint8")
+#             self.transform = transforms.Compose(
+#                 [transforms.RandomHorizontalFlip(),
+#                  transforms.RandomCrop(32, 4),
+#                  transforms.ToTensor(),
+#                  transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+#                  ]
+#             )
+#         elif self.data.ndim == 4 and self.data.shape[3] == 1:
+#             self.transform = transforms.Compose(
+#                 [transforms.ToTensor(),
+#                  transforms.Normalize((0.1307,), (0.3081,))
+#                  ]
+#             )
+#         elif self.data.ndim == 3:
+#             self.data = self.data.reshape(-1, 28, 28, 1).astype("uint8")
+#             self.transform = transforms.Compose(
+#                 [transforms.ToTensor(),
+#                  transforms.Normalize((0.1307,), (0.3081,))
+#                  ]
+#             )
+#         else:
+#             self.data = self.data.astype("float32")
+#             self.transform = None
 
-    def __len__(self):
-        return len(self.labels)
+#     def __len__(self):
+#         return len(self.labels)
 
-    def __getitem__(self, index):
-        data, target = self.data[index], self.labels[index]
+#     def __getitem__(self, index):
+#         data, target = self.data[index], self.labels[index]
 
-        if self.data.ndim == 4 and self.data.shape[3] == 3:
-            data = Image.fromarray(data)
+#         if self.data.ndim == 4 and self.data.shape[3] == 3:
+#             data = Image.fromarray(data)
 
-        if self.transform is not None:
-            data = self.transform(data)
+#         if self.transform is not None:
+#             data = self.transform(data)
 
-        return data, target
+#         return data, target
 
 
 # def read_data(data_dir):
